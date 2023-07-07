@@ -6,8 +6,23 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import org.json.*
 import java.lang.Exception
+import org.apache.http.auth.NTCredentials
+import org.apache.http.auth.AuthScope
+import org.apache.http.client.methods.HttpGet
+import org.apache.http.impl.client.BasicCredentialsProvider
+import org.apache.http.impl.client.CloseableHttpClient
+import org.apache.http.impl.client.HttpClients
+import org.apache.http.HttpEntity
+import org.apache.http.HttpResponse
+import org.apache.http.client.methods.CloseableHttpResponse
+import org.apache.http.client.methods.HttpPost
+import org.apache.http.entity.ContentType
+import org.apache.http.entity.StringEntity
+import org.apache.http.entity.mime.MultipartEntityBuilder
+import java.nio.charset.StandardCharsets
 
 val DEBUG_MODE = true
+
 
 class SharePointApiCall(
     customerNumber: String,
@@ -22,179 +37,216 @@ class SharePointApiCall(
     private val rootUrl = "http://sp-f/fb/$customerNumber/$departmentUrl"
 
     // set username for authentication
-    private val user = "FILEBANKINC\\dtrivisani"
+    private val user = "skhan"
     // read password from txt file
-    private val password = File("pass.txt").readText()
-    // http thing
-    private val client = OkHttpClient.Builder().build()
+    private val password = "SK562391$" //File("pass.txt").readText()
+
+    private val credentialsProvider: BasicCredentialsProvider = BasicCredentialsProvider()
+
+    private var httpClient: CloseableHttpClient = HttpClients.custom().build()
+    private var xToken: String
+
 
     private val localHeaders = mutableMapOf("accept" to "application/json;odata=verbose",
                                         "content-type" to "application/json;odata=verbose",
                                         "async" to "false")
     init {
-        setHeaders()
+        credentialsProvider.setCredentials(
+            AuthScope.ANY,
+            NTCredentials(user,password, "Filebank23", "filebankinc")
+        )
+        httpClient = HttpClients.custom()
+            .setDefaultCredentialsProvider(credentialsProvider)
+            .build()
+
+        xToken = getToken()
     }
 
 
     fun getToken(): String {
         // set API endpoint for getting auth token
-        val contextinfoApi = "$rootUrl/_api/contextinfo"
-        val request = Request.Builder()
-            .url(contextinfoApi)
-            .header("accept", "application/json;odata=verbose")
-            .addHeader("content-type", "application/json;odata=verbose")
-            .addHeader("async", "false")
-            .build()
-        val client = OkHttpClient()
-        val response: Response = client.newCall(request).execute()
-        val responseBody = response.body?.string()
+        val apiURL = "$rootUrl/_api/contextinfo"
+
+        val httpPost = HttpPost(apiURL)
+        httpPost.addHeader("accept","application/json;odata=verbose")
+        httpPost.addHeader("content-type","application/json;odata=verbose")
+        httpPost.addHeader("async", "false")
+
+        val response = httpClient.execute(httpPost)
+
+        val statusCode = response.statusLine.statusCode
+        val responseBody = response.entity.content.bufferedReader().use { it.readText()}
+
+        println("Status Code: $statusCode\nResponse: $responseBody")
+
         val jsonResponse = JSONObject(responseBody)
+
         return jsonResponse.getJSONObject("d")
             .getJSONObject("GetContextWebInformation")
             .getString("FormDigestValue")
     }
 
     // uploads a file
-    fun uploadFile(): Response {
+    fun uploadFile(): CloseableHttpResponse? {
         val uploadApi = "$rootUrl/_api/web/GetFolderByServerRelativeUrl('$libName')/Files/add(url='$fileName',overwrite=true)"
         val file = File(filePath)
-        val requestBody = file.asRequestBody("application/octet-stream".toMediaType())
-        val request = Request.Builder()
-            .url(uploadApi)
-            .header("accept","application/json;odata=verbose")
-            .addHeader("content-type","application/json;odata=verbose")
-            .addHeader("async", "false")
-            .post(requestBody)
-            .build()
+        val httpPost = HttpPost(uploadApi)
+        httpPost.addHeader("accept","application/json;odata=verbose")
+        httpPost.addHeader("content-type","application/json;odata=verbose")
+        httpPost.addHeader("async", "false")
+        httpPost.addHeader("X-RequestDigest", xToken)
+        val builder = MultipartEntityBuilder.create()
+        builder.addBinaryBody(
+            "file",
+            file,
+            ContentType.DEFAULT_BINARY,
+            file.name
+        )
+        val entity: HttpEntity = builder.build()
 
-        val client = OkHttpClient()
-        return client.newCall(request).execute()
+        // Set the request entity
+        httpPost.entity = entity
+        // Execute the request
+        val response = httpClient.execute(httpPost)
+
+        val statusCode = response.statusLine.statusCode
+        println(statusCode)
+        return response
     }
 
-
+// returns 403 forbidden
     fun uploadItem(): Int {
         val uploadResponse = uploadFile()
 
-        if (uploadResponse.code in 200..299) {
+        if (uploadResponse != null) {
+            if (uploadResponse.statusLine.statusCode in 200..299) {
 
-            if (propertyList.isNotEmpty()) {
+                if (propertyList.isNotEmpty()) {
 
-                val propertyResponse = setListItemProperties()
+                    val propertyResponse = setListItemProperties()
 
-                if (propertyResponse.code in 200 until 300) {
+                    if (propertyResponse.statusLine.statusCode in 200 until 300) {
+                        if (DEBUG_MODE) {
+                            println("Success")
+                        }
+                        return 0
+                    } else {
+                        if (DEBUG_MODE) {
+                            println("Unable to set properties, response returned: \n\n\t ${uploadResponse.entity.content.bufferedReader().use { it.readText() }}")
+                        }
+                        return 1
+                    }
+                }
+                else {
                     if (DEBUG_MODE) {
                         println("Success")
                     }
                     return 0
-                } else {
-                    if (DEBUG_MODE) {
-                        println("Unable to set properties, response returned: \n\n\t ${propertyResponse.body}")
-                    }
-                    return 1
                 }
             }
             else {
                 if (DEBUG_MODE) {
-                    println("Success")
+                    println("Unable to upload file, response returned: \n\n\t ${uploadResponse.entity.content.bufferedReader().use { it.readText() }}")
                 }
-                return 0
+                return -1
             }
         }
-        else {
-            if (DEBUG_MODE) {
-                println("Unable to upload file, response returned: \n\n\t ${uploadResponse.body}")
-            }
-            return -1
-        }
+        return -1
     }
     fun getLists(): JSONObject {
         val apiURL = "${rootUrl}/_api/web/lists/"
 
-        val request = Request.Builder()
-            .url(apiURL)
-            .header("accept","application/json;odata=verbose")
-            .addHeader("content-type","application/json;odata=verbose")
-            .addHeader("async", "false")
-            .build()
-        val response: Response = client.newCall(request).execute()
-        val responseBody = response.body?.string()
+        val httpGet = HttpGet(apiURL)
+        httpGet.addHeader("accept","application/json;odata=verbose")
+        httpGet.addHeader("content-type","application/json;odata=verbose")
+        httpGet.addHeader("async", "false")
+
+        val response = httpClient.execute(httpGet)
+        val statusCode = response.statusLine.statusCode
+        val responseBody = response.entity.content.bufferedReader().use { it.readText()}
+        println("Status Code: $statusCode\nResponse: $responseBody")
         return JSONObject(responseBody)
     }
 
 
     fun getListItemType() : String {
         val apiURL = "${rootUrl}/_api/web/lists/GetByTitle('${libTitle}')"
-        val request = Request.Builder()
-            .url(apiURL)
-            .header("accept","application/json;odata=verbose")
-            .addHeader("content-type","application/json;odata=verbose")
-            .addHeader("async", "false")
-            .build()
-        val response: Response = client.newCall(request).execute()
-        val responseBody = response.body?.string()
+        val httpGet = HttpGet(apiURL)
+        httpGet.addHeader("accept","application/json;odata=verbose")
+        httpGet.addHeader("content-type","application/json;odata=verbose")
+        httpGet.addHeader("async", "false")
+
+        val response = httpClient.execute(httpGet)
+        val statusCode = response.statusLine.statusCode
+        val responseBody = response.entity.content.bufferedReader().use { it.readText()}
 
         val jsonResponse = JSONObject(responseBody)
         val listItemType = jsonResponse.getJSONObject("d").getString("ListItemEntityTypeFullName")
-
+        println(listItemType)
         return listItemType
     }
 
     fun getList(customFilter: String = ""): JSONObject {
-        val urlAPI = "${rootUrl}/_api/web/lists/GetByTitle('{$libTitle}')/items?$customFilter"
-        val request = Request.Builder()
-            .url(urlAPI)
-            .header("accept","application/json;odata=verbose")
-            .addHeader("content-type","application/json;odata=verbose")
-            .addHeader("async", "false")
-            .build()
-        val response: Response = client.newCall(request).execute()
-        val responseBody = response.body?.string()
+        val apiURL = "${rootUrl}/_api/web/lists/GetByTitle('{$libTitle}')/items?$customFilter"
+        val httpGet = HttpGet(apiURL)
+        httpGet.addHeader("accept","application/json;odata=verbose")
+        httpGet.addHeader("content-type","application/json;odata=verbose")
+        httpGet.addHeader("async", "false")
+
+        val response = httpClient.execute(httpGet)
+        val statusCode = response.statusLine.statusCode
+        val responseBody = response.entity.content.bufferedReader().use { it.readText()}
+
         return  JSONObject(responseBody)
     }
 
     fun getFileNames(customFilter: String = ""): JSONObject {
         val urlAPI = "${rootUrl}/_api/web/lists/GetByTitle('${libTitle}')/items?\\\$select=FileLeafRef,FileRef&$customFilter"
-        val request = Request.Builder()
-            .url(urlAPI)
-            .header("accept","application/json;odata=verbose")
-            .addHeader("content-type","application/json;odata=verbose")
-            .addHeader("async", "false")
-            .build()
-        val response: Response = client.newCall(request).execute()
-        val responseBody = response.body?.string()
+        val httpGet = HttpGet(urlAPI)
+        httpGet.addHeader("accept","application/json;odata=verbose")
+        httpGet.addHeader("content-type","application/json;odata=verbose")
+        httpGet.addHeader("async", "false")
+
+        val response = httpClient.execute(httpGet)
+        val statusCode = response.statusLine.statusCode
+        val responseBody = response.entity.content.bufferedReader().use { it.readText()}
+
         return  JSONObject(responseBody)
     }
 
     fun customFilter(filterStr: String): JSONObject {
         val urlAPI = "${rootUrl}/_api/web/lists/GetByTitle('${libTitle}')/${filterStr}"
-        val request = Request.Builder()
-            .url(urlAPI)
-            .header("accept","application/json;odata=verbose")
-            .addHeader("content-type","application/json;odata=verbose")
-            .addHeader("async", "false")
-            .build()
-        val response: Response = client.newCall(request).execute()
-        val responseBody = response.body?.string()
+        val httpGet = HttpGet(urlAPI)
+        httpGet.addHeader("accept","application/json;odata=verbose")
+        httpGet.addHeader("content-type","application/json;odata=verbose")
+        httpGet.addHeader("async", "false")
+
+        val response = httpClient.execute(httpGet)
+        val statusCode = response.statusLine.statusCode
+        val responseBody = response.entity.content.bufferedReader().use { it.readText()}
+
         return  JSONObject(responseBody)
     }
 
     fun getItemID(): String {
-        val urlAPI = "${rootUrl}/_api/web/lists/GetByTitle('${libTitle}')/items?\$filter=FileLeafRef eq '${fileName}'"
-        val request = Request.Builder()
-            .url(urlAPI)
-            .header("accept", "application/json;odata=verbose")
-            .addHeader("content-type", "application/json;odata=verbose")
-            .addHeader("async", "false")
-            .build()
-        val response: Response = client.newCall(request).execute()
-        val responseBody = response.body?.string()
+        val urlAPI = "${rootUrl}/_api/web/lists/GetByTitle/${libTitle}/items?\$filter=FileLeafRefeq'${fileName}'"
+        val httpGet = HttpGet(urlAPI)
+        httpGet.addHeader("accept","application/json;odata=verbose")
+        httpGet.addHeader("content-type","application/json;odata=verbose")
+        httpGet.addHeader("async", "false")
+
+        val response = httpClient.execute(httpGet)
+        val statusCode = response.statusLine.statusCode
+        val responseBody = response.entity.content.bufferedReader().use { it.readText()}
         val responseJson = JSONObject(responseBody)
+        println(statusCode)
+        println(responseJson)
         return responseJson.getJSONObject("d").getJSONArray("results").getJSONObject(0).getString("ID")
     }
 
-    fun setListItemProperties(): Response {
+    fun setListItemProperties(): HttpResponse {
         val apiURL = "$rootUrl/_api/web/lists/GetByTitle('${libTitle}')/items('${getItemID()}')"
-
+        val httpPost = HttpPost(apiURL)
         val payload = JSONObject()
         payload.put("__metadata", JSONObject().put("type", getListItemType()))
 
@@ -209,33 +261,18 @@ class SharePointApiCall(
             payload.put(propertyName, propertyValue)
         }
 
-        val requestBody = payload.toString().toRequestBody("application/json".toMediaTypeOrNull())
-        val request = Request.Builder()
-            .url(apiURL)
-            .header("accept", "application/json;odata=verbose")
-            .addHeader("content-type", "application/json;odata=verbose")
-            .addHeader("async", "false")
-            .addHeader("X-HTTP-Method", "MERGE")
-            .addHeader("IF-MATCH", "*")
-            .post(requestBody)
-            .build()
+        val requestBody = payload.toString()
+        val requestEntity: HttpEntity = StringEntity(requestBody, StandardCharsets.UTF_8)
+        httpPost.entity = requestEntity
+        val response: HttpResponse = httpClient.execute(httpPost)
 
-        val client = OkHttpClient()
-        return client.newCall(request).execute()
+        // Process the response
+        val statusCode = response.statusLine.statusCode
+        val responseBody = response.entity.content.bufferedReader().use { it.readText() }
+
+        return response
     }
 
-    /*
-    * fun setHeaders() {
-    try {
-        headers["X-RequestDigest"] = getToken()
-    } catch (e: Exception) {
-        if (DEBUG_MODE) {
-            println("Error getting authorization token")
-        }
-        return -1
-    }
-    return 0
-}*/
     fun setHeaders(): Int {
         try {
             localHeaders["X-RequestDigest"] = getToken()
@@ -249,8 +286,9 @@ class SharePointApiCall(
     }
 
 
-    fun createSite(title: String, url: String, desc: String): Response {
+    fun createSite(title: String, url: String, desc: String): HttpResponse {
         val urlAPI = "${rootUrl}/_api/web/webinfos/add"
+        val httpPost = HttpPost(urlAPI)
         val payload = JSONObject()
         payload.put("parameters", JSONObject().apply {
             put("__metadata", JSONObject().apply {
@@ -263,31 +301,34 @@ class SharePointApiCall(
             put("WebTemplate", "STS")
             put("UseUniquePermissions", true)
         })
-        val requestBody = payload.toString().toRequestBody("application/json".toMediaTypeOrNull())
-        val request = Request.Builder()
-            .url(urlAPI)
-            .header("accept", "application/json;odata=verbose")
-            .addHeader("content-type", "application/json;odata=verbose")
-            .addHeader("async", "false")
-            .post(requestBody)
-            .build()
+        val requestBody = payload.toString()
+        val requestEntity: HttpEntity = StringEntity(requestBody, StandardCharsets.UTF_8)
+        httpPost.entity = requestEntity
+        val response: HttpResponse = httpClient.execute(httpPost)
 
-        return client.newCall(request).execute()
+        // Process the response
+        val statusCode = response.statusLine.statusCode
+        val responseBody = response.entity.content.bufferedReader().use { it.readText() }
+
+        return response
 
     }
 
-    fun deleteSite(url: String): Response {
+    fun deleteSite(url: String): CloseableHttpResponse? {
         val deleteApi = "${rootUrl}/$url/_api/web"
-        val request = Request.Builder()
-            .url(deleteApi)
-            .header("accept", "application/json;odata=verbose")
-            .addHeader("content-type", "application/json;odata=verbose")
-            .addHeader("async", "false")
-            .addHeader("X-HTTP-Method", "DELETE")
-            .addHeader("IF-MATCH", "*")
-            .build()
+        val httpGet = HttpGet(deleteApi)
+        httpGet.addHeader("accept","application/json;odata=verbose")
+        httpGet.addHeader("content-type","application/json;odata=verbose")
+        httpGet.addHeader("async", "false")
+        httpGet.addHeader("X-HTTP-Method", "DELETE")
+        httpGet.addHeader("IF-MATCH", "*")
 
-        return client.newCall(request).execute()
+
+        val response = httpClient.execute(httpGet)
+        val statusCode = response.statusLine.statusCode
+        val responseBody = response.entity.content.bufferedReader().use { it.readText()}
+
+        return response
     }
 
 

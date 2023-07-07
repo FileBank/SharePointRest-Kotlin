@@ -17,6 +17,10 @@ dependencies {
     implementation(kotlin("stdlib-jdk8"))
     implementation("com.squareup.okhttp3:okhttp:4.10.0")
     implementation("org.json:json:20230227")
+    implementation("org.apache.httpcomponents:httpclient:4.5.13")
+    implementation("org.apache.httpcomponents:httpcore:4.4.14")
+    implementation("org.apache.httpcomponents:httpmime:4.5.13")
+
 }
 
 tasks.test {
